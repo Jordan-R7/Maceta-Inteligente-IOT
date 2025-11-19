@@ -1,0 +1,317 @@
+#PROYECTO FINAL
+#By Jordan del Aguila
+#Desarrollado en MycroPython
+
+from machine import Pin, ADC, time_pulse_us, PWM
+import dht
+from umqtt.simple import MQTTClient
+import network, ntptime, time
+
+#configurar valvula
+valvula = Pin(19,Pin.OUT)
+valvula.value(0)
+
+#configurar internet
+WIFI_SSID = "WIFI-ITM"
+WIFI_PASSWORD = "" #A
+
+THINGSPEAK_MQTT_SERVER = "mqtt3.thingspeak.com"
+THINGSPEAK_CHANNEL_ID = "3155217"
+MQTT_CLIENT_ID = "Ii4tMiQ8BScZFTo1LBMlKBc"
+MQTT_USERNAME = "Ii4tMiQ8BScZFTo1LBMlKBc"
+MQTT_PASSWORD = "Dj6Pv0OyUwD5o9+zRr04kuDK"
+PUBLISH_INTERVAL = 20
+
+#buzzer
+buzzer = PWM(Pin(14))
+buzzer.deinit()
+
+#sensor humedad
+sensor_humedad = ADC(Pin(34))  
+sensor_humedad.atten(ADC.ATTN_11DB)  
+sensor_humedad.width(ADC.WIDTH_12BIT)
+
+#configuracion leds
+led_ok = Pin(2,Pin.OUT)
+led_ok.value(0)
+led_noche = Pin(23,Pin.OUT)
+led_noche.value(0)
+led_azul = Pin(27, Pin.OUT)
+led_amarillo = Pin(26, Pin.OUT)
+led_verde = Pin(25, Pin.OUT)
+led_rojo = Pin(33, Pin.OUT)
+led_off = Pin(21, Pin.OUT)
+led_on = Pin(32, Pin.OUT)
+
+#configurar ultasonido
+echo = Pin(5, Pin.IN)
+trig = Pin(18, Pin.OUT)
+
+# Configuracion ldr
+ldr = ADC(Pin(35))
+ldr.atten(ADC.ATTN_11DB)  
+ldr.width(ADC.WIDTH_12BIT)
+
+#configurar dht22
+sensor = dht.DHT22(Pin(15))
+
+# Valores por defecto
+#tiempo
+ultimo_blink=0
+ultimo_envio = 0
+
+#contador
+contador_intrusos = 0
+ultimo_intruso = 0
+
+#inicializar valores
+temp_actual = 0
+hum_aire_actual = 0
+hum_suelo_actual = 0
+luz_actual = 0
+
+#estandares de riego
+DURACION_RIEGO = 10
+UMBRAL_HUMEDAD_SECA = 3000 
+INTERVALO_ENTRE_RIEGOS = 10  
+TIEMPO_MAX_RIEGO = 20
+
+#inicio de valvula
+valvula_activa = False
+ultimo_riego = 0
+inicio_riego = 0
+
+
+led_amarillo.value(0)
+led_rojo.value(0)
+led_azul.value(0)
+led_verde.value(0)
+
+def conectar_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+    print("Conectando al WiFi...", end="")
+    while not wlan.isconnected():
+        print(".", end="")
+        led_off.on()
+        led_on.off()
+        time.sleep(0.5)
+    print("\nWiFi conectado. IP:", wlan.ifconfig()[0])
+    led_off.off()
+    led_on.on()
+    print("Sincronizando hora con servidor NTP...")
+    try:
+        ntptime.settime()
+        print("Hora sincronizada con NTP")
+        led_off.off()
+        led_on.on()
+    except Exception as e:
+        print("No se pudo sincronizar la hora:", e)
+        led_off.on()
+        led_on.off()
+
+def conectar_mqtt():
+    client = MQTTClient(
+        MQTT_CLIENT_ID,
+        THINGSPEAK_MQTT_SERVER,
+        user=MQTT_USERNAME,
+        password=MQTT_PASSWORD,
+        port=1883, #8883
+        ssl=False  #True
+    )
+    client.connect()
+    print("Conectado a ThingSpeak MQTT como device.")
+    led_off.off()
+    led_on.on()
+    return client
+
+def enviar_datos(client, temp_aire, hum_aire, hum_suelo, luz, intrusos):
+    topic = f"channels/{THINGSPEAK_CHANNEL_ID}/publish"
+    payload = ( f"field1={temp_aire}"
+        f"&field2={hum_aire}"
+        f"&field3={hum_suelo}"
+        f"&field4={luz}"
+        f"&field5={intrusos}"
+         ) 
+    try:
+        client.publish(topic, payload)
+        print("Datos enviados a ThingSpeak")
+        print(f"   Temp: {temp_aire}°C | Hum Aire: {hum_aire}% | Hum Suelo: {hum_suelo}")
+        print(f"   Luz: {luz}% | Intrusos: {intrusos}")
+        print("///////////////////////////////////////////////////////////////////////////////////////////////////////////")
+    except Exception as e:
+        print("Error enviando datos:", e)
+        
+def hora_local():
+    t = time.localtime()
+    UTC_Colombia = -5
+    hora = (t[3] + UTC_Colombia) % 24
+    minuto = t[4]
+    segundo = t[5]
+    return hora, minuto, segundo
+
+def sonar(frec, duracion=2):
+    buzzer.init(freq=frec, duty=512)
+    time.sleep(duracion)
+    buzzer.deinit()
+
+def humedad():
+    global hum_suelo_actual
+    valor = sensor_humedad.read()
+    hum_suelo_actual = valor
+    
+    if valor > 3000:
+        led_rojo.value(1)
+        led_azul.value(0)
+        led_amarillo.value(0)
+        led_verde.value(0)
+        print(f"HUMEDAD DEL SUELO: {valor} -------- MUY SECO")
+    elif valor > 2500:
+        led_azul.value(0)
+        led_rojo.value(0)
+        led_amarillo.value(1)
+        led_verde.value(0)
+        print(f"HUMEDAD DEL SUELO: {valor} -------- SECO")
+    elif valor > 2000:
+        led_verde.value(1)
+        led_rojo.value(0)
+        led_amarillo.value(0)
+        led_azul.value(0)
+        print(f"HUMEDAD DEL SUELO: {valor} -------- BIEN")
+    else:
+        led_azul.value(1)
+        led_rojo.value(0)
+        led_verde.value(0)
+        led_amarillo.value(0)
+        print(f"HUMEDAD DEL SUELO: {valor} -------- MUY HUMEDO")
+
+    print("-------------------------------------------------")
+              
+def medir_d():
+    global contador_intrusos, ultimo_intruso
+    trig.off()
+    time.sleep_us(2)
+    trig.on()
+    time.sleep_us(10)
+    trig.off()
+    
+    try:
+        duracion= time_pulse_us(echo, 1, 30000)
+        distancia = (duracion * 0.0343)/2
+        print("Distancia medida: {:.2f} cm".format(distancia))
+    
+        if distancia < 20:
+            ahora = time.ticks_ms()
+            if time.ticks_diff(ahora, ultimo_intruso) > 5000:
+                contador_intrusos += 1
+                ultimo_intruso = ahora
+                print(f"INTRUSO #{contador_intrusos} DETECTADO!")
+            sonar(800, 5)
+        
+    except OSError:
+        print("Ultrasonido: sin eco detectado(timeout)")
+        
+    print("-------------------------------------------------")       
+
+    
+
+def noche():
+    global luz_actual
+    lectura=ldr.read()
+    porcentaje = int((lectura / 4095)*100)
+    luz_actual = porcentaje
+    
+    if lectura <= 200:
+        print(f"Es de noche. Luz: {porcentaje}%") 
+        led_noche.value(1)
+    else:
+        print(f"Es de dia. Luz: {porcentaje}%") 
+        led_noche.value(0)
+
+    print("-------------------------------------------------")
+        
+def ok(intervalo=2000):
+    global ultimo_blink
+    ahora = time.ticks_ms()
+    if time.ticks_diff(ahora, ultimo_blink) >= intervalo:
+        led_ok.value(1)
+        time.sleep(0.1)
+        led_ok.value(0)
+        ultimo_blink = ahora
+        
+def ambiente():
+    global temp_actual, hum_aire_actual
+    try:
+        sensor.measure()
+        temperatura = sensor.temperature()
+        humedad_aire = sensor.humidity()
+        temp_actual = temperatura
+        hum_aire_actual = humedad_aire
+        print("Temperatura del Aire:", temperatura, "°C")
+        print("Humedad del Aire:", humedad_aire, "%")
+        print("-------------------------------------------------")
+    except OSError as e:
+        print("Error DHT22:", e)
+        print("-------------------------------------------------")
+        
+def controlar_valvula():
+    global valvula_activa, ultimo_riego, inicio_riego
+    ahora = time.time()
+
+    if valvula_activa and (ahora - inicio_riego) > TIEMPO_MAX_RIEGO:
+        valvula.value(0)
+        valvula_activa = False
+        print("-------------------Cierre de emergencia-------------------------")
+
+    if valvula_activa:
+        tiempo_transcurrido = ahora - inicio_riego
+        if tiempo_transcurrido >= DURACION_RIEGO:
+            valvula.value(1)
+            print("-------------------Cerrar válvula (riego completado)-------------------------")
+            valvula_activa = False
+            ultimo_riego = ahora
+
+    elif hum_suelo_actual >= UMBRAL_HUMEDAD_SECA:
+        tiempo_desde_ultimo = ahora - ultimo_riego
+        if (tiempo_desde_ultimo >= INTERVALO_ENTRE_RIEGOS or ultimo_riego == 0) and not valvula_activa:
+            valvula.value(0)
+            print("-------------------Abrir válvula (suelo seco)------------------------")
+            valvula_activa = True
+            inicio_riego = ahora
+            
+    elif hum_suelo_actual < UMBRAL_HUMEDAD_SECA - 500:
+        if valvula_activa:
+            valvula.value(0)
+            print("-------------------Cerrar válvula (suelo húmedo)------------------------")
+            valvula_activa = False
+            ultimo_riego = ahora
+              
+            
+print("=== INICIANDO SISTEMA ===")
+conectar_wifi()
+mqtt_client = conectar_mqtt()
+print("=== SISTEMA LISTO ===\n")    
+    
+while True:
+    print("##################################################################################################################")
+    noche()
+    humedad()
+    ambiente()
+    medir_d()
+    controlar_valvula()
+    ok()
+    print("##################################################################################################################")
+    ahora = time.time()
+    if ahora - ultimo_envio >= PUBLISH_INTERVAL:
+        enviar_datos(
+            mqtt_client,
+            temp_actual,
+            hum_aire_actual,
+            hum_suelo_actual,
+            luz_actual,
+            contador_intrusos
+        )
+        ultimo_envio = ahora
+    
+    time.sleep(5)

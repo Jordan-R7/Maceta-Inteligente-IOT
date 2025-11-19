@@ -291,8 +291,9 @@ def controlar_valvula():
 print("=== INICIANDO SISTEMA ===")
 conectar_wifi()
 mqtt_client = conectar_mqtt()
-print("=== SISTEMA LISTO ===\n")    
-    
+print("=== SISTEMA LISTO ===\n")   
+
+#Bucle Principal
 while True:
     print("##################################################################################################################")
     noche()
